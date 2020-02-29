@@ -1,0 +1,329 @@
+#include "widget.h"
+#include "ui_widget.h"
+#include <QtNetwork/QUdpSocket>                 //P2P即服务端和客户端所需要
+#include <QtNetwork/qudpsocket.h>
+#include <QtNetwork/qhostinfo.h>
+#include <QtNetwork/QHostInfo>                  //IP查找需要
+#include <QMessageBox>                          //标准对话框
+#include <QScrollBar>                           //下拉条
+#include <QDateTime>
+#include <QtNetwork/QNetworkInterface>          //IP地址和网络接口
+#include <QProcess>                             //允许外部程序与之交互
+#include "server.h"
+#include "client.h"
+#include <QFileDialog>
+#include <QColorDialog>
+
+Widget::Widget(QWidget *parent, QString usrname) :
+    QWidget(parent),
+    ui(new Ui::Widget)
+{
+
+    //可用来接收其他用户的UDP广播消息
+    ui->setupUi(this);
+    uName = usrname;
+    udpSocket = new QUdpSocket(this);
+
+    port = 23232;                    //默认端口
+    udpSocket->bind(port, QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint);
+    connect(udpSocket, SIGNAL(readyRead()), this, SLOT(processPendingDatagrams()));
+    sndMsg(UsrEnter);           //发送消息函数
+    srv = new Server(this);
+    connect(srv, SIGNAL(sndFileName(QString)), this, SLOT(getFileName(QString)));
+
+}
+
+void Widget::getFileName(QString name){
+    fileName = name;
+    sndMsg(FileName);                                           //获得UDP广播
+}
+
+
+
+Widget::~Widget()
+{
+    delete ui;
+}
+
+void Widget::sndMsg(MsgType type, QString srvaddr){
+    QByteArray data;
+    QDataStream out(&data, QIODevice::WriteOnly);
+    QString address = getIP();
+
+    out<<type<<getUsr();            //处理消息
+    switch (type) {
+    case Msg:
+        if(ui->msgTxtEdit->toPlainText() == ""){
+            QMessageBox::warning(0, tr("警告"), tr("发送内容不能为空，请重新输入！"), QMessageBox::Ok);
+            return;
+        }
+        out<<address<<getMsg();
+        ui->msgBrowser->verticalScrollBar()->setValue(ui->msgBrowser->verticalScrollBar()->maximum());
+
+        break;
+
+
+    case UsrEnter:
+        out<<address;               //加入新用户，写入IP地址
+        break;
+
+    case UsrLeft:                   //用户退出
+        break;
+
+    //后面进行处理
+    case FileName:   {               //发文件
+        int row = ui->usrTblWidget->currentRow();
+        QString clntaddr = ui->usrTblWidget->item(row, 1)->text();
+        out<<address<<clntaddr<<fileName;
+        break;
+    }
+    case Refuse:                    //拒绝接收文件
+        out<<srvaddr;
+        break;
+    }
+    udpSocket->writeDatagram(data, data.length(), QHostAddress::Broadcast, port);                       //处理信息后，进行UDP广播
+}
+
+void Widget::processPendingDatagrams(){
+
+    while(udpSocket->hasPendingDatagrams()){                                 //判断是否有可供读取的信息
+        QByteArray datagram;
+
+        datagram.resize(udpSocket->pendingDatagramSize());                   //信息送入缓冲区
+        udpSocket->readDatagram(datagram.data(), datagram.size());
+        QDataStream in(&datagram, QIODevice::ReadOnly);
+
+        int msgType;
+        in>>msgType;                                                         //读取信息类型
+
+        QString usrName, ipAddr, msg;
+        QString time = QDateTime::currentDateTime().toString("yyyy-MM-ddhh:mm:ss");       //显示时间
+
+        switch (msgType) {
+            case Msg:                                                        //普通信息：获取用户名、IP地址、内容等信息和系统时间
+                in>>usrName>>ipAddr>>msg;
+                ui->msgBrowser->setTextColor(Qt::blue);
+                ui->msgBrowser->setCurrentFont(QFont("Times New Roman", 12));
+                ui->msgBrowser->append("[" + usrName + " ] " + time);
+                ui->msgBrowser->append(msg);
+                break;
+
+            case UsrEnter:                                                   //新用户加入：获取新用户名、IP地址进行新用户登录处理
+                in>>usrName>>ipAddr;
+                usrEnter(usrName, ipAddr);
+                break;
+
+            case UsrLeft:
+                in>>usrName;                                                 //用户退出：获取用户名
+                usrLeft(usrName, time);
+                break;
+
+            //文件传输先不写
+            case FileName:{
+                in>>usrName>>ipAddr;
+                QString clntAddr, fileName;
+                in>>clntAddr>>fileName;
+                hasPendingFile(usrName, ipAddr, clntAddr, fileName);
+                break;
+            }
+            case Refuse:{
+                in>>usrName;
+                QString srvAddr;
+                in>>srvAddr;
+                QString ipAdd = getIP();
+                if(ipAdd == srvAddr)
+                    srv->refused();
+                break;
+            }
+        }
+    }
+}
+
+//本函数功能：提示是否接收文件，若拒绝，则发送UDP拒绝广播
+void Widget::hasPendingFile(QString usrname, QString srvaddr, QString clntaddr, QString filename){
+    QString ipAddr = getIP();
+
+    if(ipAddr == clntaddr){
+        int btn = QMessageBox::information(this, tr("接收文件"), tr("来自%1(%2)的文件：%3,是否接收？").arg(usrname).arg(srvaddr).arg(filename),QMessageBox::Yes, QMessageBox::No);
+        if(btn == QMessageBox::Yes){
+            QString name = QFileDialog::getSaveFileName(0, tr("保存文件"), filename);
+            if(!name.isEmpty()){
+                Client *clnt = new Client(this);
+                clnt->setFileName(name);
+                clnt->setHostAddr(QHostAddress(srvaddr));
+                clnt->show();
+            }
+        }
+        else
+            sndMsg(Refuse, srvaddr);
+    }
+}
+
+//保存传输过来的文件路径
+void Client::setFileName(QString name){
+    locFile = new QFile(name);
+}
+
+//保存传输过来的IP地址
+
+void Client::setHostAddr(QHostAddress addr){
+    HostAddr = addr;
+    newConn();
+}
+
+/*本函数功能：判断该用户是否加入用户列表，若没有，则添加到用户列表，加入新用户信息*/
+void Widget::usrEnter(QString usrname, QString ipaddr){
+    bool isEmpty = ui->usrTblWidget->findItems(usrname, Qt::MatchExactly).isEmpty();
+
+    if(isEmpty){
+        QTableWidgetItem *usr = new QTableWidgetItem(usrname);
+        QTableWidgetItem *ip = new QTableWidgetItem(ipaddr);
+
+        //新用户信息
+        ui->usrTblWidget->insertRow(0);
+        ui->usrTblWidget->setItem(0, 0, usr);
+        ui->usrTblWidget->setItem(0, 1, ip);
+
+        //判断是否加入用户列表
+        ui->msgBrowser->setTextColor(Qt::gray);
+        ui->msgBrowser->setCurrentFont(QFont("Times New Roman", 10));
+        ui->msgBrowser->append(tr("%1 在线!").arg(usrname));
+        ui->usrNumLbl->setText(tr("在线人数：%1").arg(ui->usrTblWidget->rowCount()));
+
+        sndMsg(UsrEnter);      // 让刚上线的用户能看到之前就已经在线的用户
+    }
+}
+
+/*本函数功能：删除用户信息*/
+void Widget::usrLeft(QString usrname, QString time){
+    int rowNum = ui->usrTblWidget->findItems(usrname, Qt::MatchExactly).first()->row();
+
+    ui->usrTblWidget->removeRow(rowNum);
+    ui->msgBrowser->setTextColor(Qt::gray);
+    ui->msgBrowser->setCurrentFont(QFont("Times New Roman", 10));
+    ui->msgBrowser->append(tr("%1 于 %2 离开！").arg(usrname).arg(time));
+    ui->usrNumLbl->setText(tr("在线人数：%1").arg(ui->usrTblWidget->rowCount()));
+}
+
+//获取IP地址
+QString Widget::getIP(){
+    QList<QHostAddress> list = QNetworkInterface::allAddresses();
+    foreach (QHostAddress addr, list) {
+        if(addr.protocol() == QAbstractSocket::IPv4Protocol)
+            return addr.toString();
+    }
+    return 0;
+}
+
+//获取用户名
+QString Widget::getUsr(){
+    return uName;
+}
+
+/*本函数功能：获取聊天信息并清空文本框并转到clicked()按钮*/
+QString Widget::getMsg(){
+    QString msg = ui->msgTxtEdit->toHtml();
+
+    ui->msgTxtEdit->clear();
+    ui->msgTxtEdit->setFocus();
+
+    return msg;
+}
+
+void Widget::on_sendBtn_clicked(){
+    sndMsg(Msg);
+}
+
+/*本函数功能：点击传输文件按钮后触发的事件*/
+void Widget::on_sendTBtn_clicked(){
+    if(ui->usrTblWidget->selectedItems().isEmpty()){
+        QMessageBox::warning(0, tr("选择用户"), tr("请先选择目标用户！"), QMessageBox::Ok);
+        return;
+    }
+    srv->show();
+    srv->initSrv();
+}
+
+/*本函数功能：字体样式*/
+void Widget::on_fontCbx_currentFontChanged(const QFont &f){
+    ui->msgTxtEdit->setCurrentFont(f);
+    ui->msgTxtEdit->setFocus();
+}
+
+/*本函数功能：字体大小*/
+void Widget::on_sizeCbx_currentIndexChanged(const QString &arg1){
+    ui->msgTxtEdit->setFontPointSize(arg1.toDouble());
+    ui->msgTxtEdit->setFocus();
+}
+
+/*本函数功能：字体加粗*/
+void Widget::on_boldTBtn_clicked(bool checked){
+    if(checked)
+        ui->msgTxtEdit->setFontWeight(QFont::Bold);
+    else
+        ui->msgTxtEdit->setFontWeight(QFont::Normal);
+    ui->msgTxtEdit->setFocus();
+}
+
+/*本函数功能：字体斜体*/
+void Widget::on_italicTBtn_clicked(bool checked){
+    ui->msgTxtEdit->setFontItalic(checked);
+    ui->msgTxtEdit->setFocus();
+}
+
+/*本函数功能：字体下划线*/
+void Widget::on_underlineTBtn_clicked(bool checked){
+    ui->msgTxtEdit->setFontUnderline(checked);
+    ui->msgTxtEdit->setFocus();
+}
+
+/*本函数功能：文本颜色*/
+void Widget::on_colorTBtn_clicked(){
+    color = QColorDialog::getColor(color, this);
+    if(color.isValid()){
+        ui->msgTxtEdit->setTextColor(color);
+        ui->msgTxtEdit->setFocus();
+    }
+}
+
+/*本函数功能：保存聊天记录*/
+void Widget::on_saveTBtn_clicked(){
+    if(ui->msgBrowser->document()->isEmpty()){
+        QMessageBox::warning(0, tr("警告"), tr("聊天记录为空，无法保存！"), QMessageBox::Ok);
+    }
+    else{
+        QString fname = QFileDialog::getSaveFileName(this, tr("保存聊天记录"), tr("聊天记录"), tr("文本(*.txt);;所有文件(*.*)"));
+        if(!fname.isEmpty())
+            saveFile(fname);                                //保存下来文件
+    }
+}
+
+/*本函数功能：保存文件*/
+bool Widget::saveFile(const QString &filename){
+    QFile file(filename);
+    if(!file.open(QFile::WriteOnly | QFile::Text)){
+        QMessageBox::warning(this, tr("保存文件"), tr("无法保存文件 %1:\n %2").arg(filename).arg(file.errorString()));
+        return false;
+    }
+    QTextStream out(&file);
+    out<<ui->msgBrowser->toPlainText();
+    return true;
+}
+
+/*本函数功能：清除聊天记录*/
+void Widget::on_clearTBtn_clicked()
+{
+    ui->msgBrowser->clear();
+}
+
+/*本函数功能：退出聊天*/
+void Widget::on_exitBtn_clicked()
+{
+    close();
+}
+
+void Widget::closeEvent(QCloseEvent *e){
+    sndMsg(UsrLeft);
+    QWidget::closeEvent(e);
+}
+

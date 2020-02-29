@@ -1,0 +1,27 @@
+<RCC>
+    <qresource prefix = "/">
+        <file>images/LightApple.png</file>
+        <file>images/Shana.png</file>
+        <file>images/cake.png</file>
+        <file>images/dolphin.png</file>
+        <file>images/doughnut.png</file>
+        <file>images/egg.png</file>
+        <file>images/giraffe.png</file>
+        <file>images/CoolApple.png</file>
+        <file>images/spaghetti.png</file>
+
+        <file>images/bold.png</file>
+        <file>images/clear.png</file>
+        <file>images/color.png</file>
+        <file>images/italic.png</file>
+        <file>images/save.png</file>
+        <file>images/send.png</file>
+        <file>images/under.png</file>
+
+        <file>images/back.png</file>
+        <file>images/data.png</file>
+        <file>images/file.png</file>
+        <file>images/chat.png</file>
+        <file>images/register.png</file>
+    </qresource>
+</RCC>
